@@ -1,0 +1,100 @@
+package server
+
+import (
+	"io"
+	"log"
+	"net"
+	"strconv"
+
+	"github.com/gurshaan17/redis/config"
+)
+
+func RunSyncTCPServer() {
+	log.Println(
+		"starting a synchronous TCP server on",
+		config.Host,
+		config.Port,
+	)
+
+	conClients := 0
+
+	// listen on host:port
+	lsnr, err := net.Listen(
+		"tcp",
+		config.Host+":"+strconv.Itoa(config.Port),
+	)
+	if err != nil {
+		panic(err)
+	}
+	defer lsnr.Close()
+
+	for {
+		// blocking call: wait for a new client
+		c, err := lsnr.Accept()
+		if err != nil {
+			log.Println("accept error:", err)
+			continue
+		}
+
+		conClients++
+		log.Println(
+			"client connected:",
+			c.RemoteAddr(),
+			"concurrent clients:",
+			conClients,
+		)
+
+		// synchronous: handle client in same goroutine
+		handleClient(c, &conClients)
+	}
+}
+
+func handleClient(c net.Conn, conClients *int) {
+	defer func() {
+		c.Close()
+		*conClients--
+		log.Println(
+			"client disconnected:",
+			c.RemoteAddr(),
+			"concurrent clients:",
+			*conClients,
+		)
+	}()
+
+	for {
+		// read command
+		cmd, err := readCommand(c)
+		if err != nil {
+			if err == io.EOF {
+				return
+			}
+			log.Println("read error:", err)
+			return
+		}
+
+		log.Println("command:", cmd)
+
+		// echo back (for now)
+		if err := respond(cmd, c); err != nil {
+			log.Println("write error:", err)
+			return
+		}
+	}
+}
+
+func readCommand(c net.Conn) (string, error) {
+	// max 512 bytes per read
+	buf := make([]byte, 512)
+
+	n, err := c.Read(buf)
+	if err != nil {
+		return "", err
+	}
+
+	return string(buf[:n]), nil
+}
+
+func respond(cmd string, c net.Conn) error {
+	_, err := c.Write([]byte(cmd))
+	return err
+}
