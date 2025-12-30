@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/gurshaan17/redis/config"
+	"github.com/gurshaan17/redis/core"
 )
 
 func RunSyncTCPServer() {
@@ -62,7 +63,6 @@ func handleClient(c net.Conn, conClients *int) {
 	}()
 
 	for {
-		// read command
 		cmd, err := readCommand(c)
 		if err != nil {
 			if err == io.EOF {
@@ -72,14 +72,20 @@ func handleClient(c net.Conn, conClients *int) {
 			return
 		}
 
-		log.Println("command:", cmd)
-
-		// echo back (for now)
-		if err := respond(cmd, c); err != nil {
-			log.Println("write error:", err)
-			return
+		// 🔹 Decode RESP here
+		value, err := core.Decode([]byte(cmd))
+		if err != nil {
+			log.Println("RESP decode error:", err)
+			c.Write([]byte("-ERR invalid command\r\n"))
+			continue
 		}
+
+		log.Printf("decoded value: %#v\n", value)
+
+		// 🔹 For now: respond with OK (later: command handling)
+		c.Write([]byte("+OK\r\n"))
 	}
+
 }
 
 func readCommand(c net.Conn) (string, error) {
