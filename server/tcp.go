@@ -1,10 +1,12 @@
 package server
 
 import (
+	"bufio"
 	"io"
 	"log"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/gurshaan17/redis/config"
 	"github.com/gurshaan17/redis/core"
@@ -19,7 +21,6 @@ func RunSyncTCPServer() {
 
 	conClients := 0
 
-	// listen on host:port
 	lsnr, err := net.Listen(
 		"tcp",
 		config.Host+":"+strconv.Itoa(config.Port),
@@ -30,7 +31,6 @@ func RunSyncTCPServer() {
 	defer lsnr.Close()
 
 	for {
-		// blocking call: wait for a new client
 		c, err := lsnr.Accept()
 		if err != nil {
 			log.Println("accept error:", err)
@@ -45,8 +45,7 @@ func RunSyncTCPServer() {
 			conClients,
 		)
 
-		// synchronous: handle client in same goroutine
-		handleClient(c, &conClients)
+		go handleClient(c, &conClients)
 	}
 }
 
@@ -54,16 +53,15 @@ func handleClient(c net.Conn, conClients *int) {
 	defer func() {
 		c.Close()
 		*conClients--
-		log.Println(
-			"client disconnected:",
-			c.RemoteAddr(),
-			"concurrent clients:",
-			*conClients,
-		)
+		log.Println("client disconnected:", c.RemoteAddr())
 	}()
 
+	reader := bufio.NewReader(c)
+	buffer := make([]byte, 0)
+
 	for {
-		cmd, err := readCommand(c)
+		tmp := make([]byte, 1024)
+		n, err := reader.Read(tmp)
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -72,35 +70,42 @@ func handleClient(c net.Conn, conClients *int) {
 			return
 		}
 
-		// 🔹 Decode RESP here
-		value, err := core.Decode([]byte(cmd))
-		if err != nil {
-			log.Println("RESP decode error:", err)
-			c.Write([]byte("-ERR invalid command\r\n"))
-			continue
+		// append new data to buffer
+		buffer = append(buffer, tmp[:n]...)
+
+		for {
+			value, delta, err := core.DecodeOne(buffer)
+			if err != nil {
+				// not enough data yet → wait for more
+				break
+			}
+
+			buffer = buffer[delta:]
+
+			arr, ok := value.([]interface{})
+			if !ok || len(arr) == 0 {
+				c.Write([]byte("-ERR invalid command\r\n"))
+				continue
+			}
+
+			tokens := make([]string, len(arr))
+			for i := range arr {
+				s, ok := arr[i].(string)
+				if !ok {
+					c.Write([]byte("-ERR invalid argument type\r\n"))
+					continue
+				}
+				tokens[i] = s
+			}
+
+			cmd := &core.RedisCmd{
+				Cmd:  strings.ToUpper(tokens[0]),
+				Args: tokens[1:],
+			}
+
+			if err := core.EvalAndRespond(cmd, c); err != nil {
+				c.Write([]byte("-" + err.Error() + "\r\n"))
+			}
 		}
-
-		log.Printf("decoded value: %#v\n", value)
-
-		// 🔹 For now: respond with OK (later: command handling)
-		c.Write([]byte("+OK\r\n"))
 	}
-
-}
-
-func readCommand(c net.Conn) (string, error) {
-	// max 512 bytes per read
-	buf := make([]byte, 512)
-
-	n, err := c.Read(buf)
-	if err != nil {
-		return "", err
-	}
-
-	return string(buf[:n]), nil
-}
-
-func respond(cmd string, c net.Conn) error {
-	_, err := c.Write([]byte(cmd))
-	return err
 }
